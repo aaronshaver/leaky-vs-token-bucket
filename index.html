@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Rate Limiting Visualizer v1</title>
+  <title>Rate Limiting Visualizer</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     * { box-sizing: border-box; }
@@ -148,8 +148,8 @@
               <input type="number" class="form-control form-control-sm" id="leakyDripRate" value="1" min="0" max="20" step="1">
             </div>
             <div class="col-4">
-              <label class="form-label small">Backpressure Delay</label>
-              <input type="number" class="form-control form-control-sm" id="leakyBackpressureDelay" value="2" min="0" step="1">
+              <label class="form-label small">Backpressure Cooldown (sec)</label>
+              <input type="number" class="form-control form-control-sm" id="leakyCooldownSec" value="1" min="0" step="0.1">
             </div>
 
             <div class="col-3">
@@ -166,6 +166,7 @@
             </div>
           </div>
         </div>
+
         <div class="visualization" id="leakyViz">
           <div class="bucket-info">
             <div>Capacity: 100</div>
@@ -196,8 +197,8 @@
               <input type="number" class="form-control form-control-sm" id="burstAmount" value="50" min="1" max="100">
             </div>
             <div class="col-3">
-              <label class="form-label small">Backpressure Delay</label>
-              <input type="number" class="form-control form-control-sm" id="tokenBackpressureDelay" value="2" min="0" step="1">
+              <label class="form-label small">Backpressure Cooldown (sec)</label>
+              <input type="number" class="form-control form-control-sm" id="tokenCooldownSec" value="1" min="0" step="0.1">
             </div>
 
             <div class="col-2">
@@ -217,6 +218,7 @@
             </div>
           </div>
         </div>
+
         <div class="visualization" id="tokenViz">
           <div class="bucket-info">
             <div>Capacity: 100</div>
@@ -238,19 +240,21 @@
 
     // State
     let leakyState = {
-      bucketCount: 0,
-      pendingAccepted: 0, // NEW
+      bucketCount: 0,          // LOGICAL count (includes balls "on the way")
       overflowed: 0,
       consumed: 0,
-      balls: []
+      balls: [],               // landed-in-bucket balls (FIFO)
+      inFlight: [],            // accepted but still falling (FIFO)
+      cooldownUntilMs: 0
     };
 
     let tokenState = {
-      bucketCount: 0,
-      pendingAccepted: 0, // NEW
+      bucketCount: 0,          // LOGICAL count (includes balls "on the way")
       overflowed: 0,
       taken: 0,
-      balls: []
+      balls: [],               // landed-in-bucket balls (LIFO)
+      inFlight: [],            // accepted but still falling (LIFO-ish)
+      cooldownUntilMs: 0
     };
 
     // DOM Elements
@@ -280,6 +284,7 @@
       ball.className = `ball ${color}`;
       ball.style.left = `${x}px`;
       ball.style.top = `${y}px`;
+      ball.dataset.animKey = "0";
       container.appendChild(ball);
       return ball;
     }
@@ -295,28 +300,30 @@
       return Math.max(1, Math.floor((Date.now() - simulationStartTime) / 1000));
     }
 
-    function getIntValue(id, fallback = 0) {
-      const v = parseInt(document.getElementById(id).value, 10);
+    function getFloatValue(id, fallback = 0) {
+      const v = parseFloat(document.getElementById(id).value);
       return Number.isFinite(v) ? v : fallback;
+    }
+
+    function bumpAnimKey(ball) {
+      const k = parseInt(ball.dataset.animKey || "0", 10) || 0;
+      ball.dataset.animKey = String(k + 1);
     }
 
     // Update stats display
     function updateStats() {
+      const now = Date.now();
+
       const leakyDataRate = parseFloat(document.getElementById('leakyDataRate').value) || 0;
       const tokenAddRate = parseFloat(document.getElementById('tokenAddRate').value) || 0;
       const elapsedSeconds = getElapsedSeconds();
 
-      const leakyBackpressureDelay = Math.max(0, getIntValue('leakyBackpressureDelay', 0));
-      const tokenBackpressureDelay = Math.max(0, getIntValue('tokenBackpressureDelay', 0));
+      const leakyInCooldown = now < leakyState.cooldownUntilMs;
+      const tokenInCooldown = now < tokenState.cooldownUntilMs;
 
-      const leakyFullness = leakyState.bucketCount + leakyState.pendingAccepted;
-      const tokenFullness = tokenState.bucketCount + tokenState.pendingAccepted;
+      const leakyProducerOn = leakyDataRate > 0 && !leakyInCooldown && leakyState.bucketCount < BUCKET_CAPACITY;
+      const tokenProducerOn = tokenAddRate > 0 && !tokenInCooldown && tokenState.bucketCount < BUCKET_CAPACITY;
 
-      // Producer is OFF if rate is 0 OR "admit limit" reached (capacity + backpressure delay)
-      const leakyProducerOn = leakyDataRate > 0 && leakyFullness < (BUCKET_CAPACITY + leakyBackpressureDelay);
-      const tokenProducerOn = tokenAddRate > 0 && tokenFullness < (BUCKET_CAPACITY + tokenBackpressureDelay);
-
-      // Calculate effective consumption rates
       const leakyEffectiveRate = (leakyState.consumed / elapsedSeconds).toFixed(2);
       const tokenEffectiveRate = (tokenState.taken / elapsedSeconds).toFixed(2);
 
@@ -338,15 +345,20 @@
       updateFillLevel(tokenFill, tokenState.bucketCount);
     }
 
-    // Animate ball falling
+    // Animate ball falling (cancellable per-ball)
     function animateBall(ball, targetY, duration, onComplete) {
       const startY = parseFloat(ball.style.top);
       const startTime = performance.now();
 
+      const animKey = (parseInt(ball.dataset.animKey || "0", 10) || 0) + 1;
+      ball.dataset.animKey = String(animKey);
+
       function animate(currentTime) {
+        if (ball.dataset.animKey !== String(animKey)) return; // cancelled/replaced
+
         const elapsed = currentTime - startTime;
         const progress = Math.min(elapsed / duration, 1);
-        const easeProgress = progress * progress; // Simple ease-in
+        const easeProgress = progress * progress;
 
         const currentY = startY + (targetY - startY) * easeProgress;
         ball.style.top = `${currentY}px`;
@@ -363,6 +375,8 @@
 
     // Animate overflow (ball falls to the side)
     function animateOverflow(ball, direction, vizHeight) {
+      bumpAnimKey(ball);
+
       const startX = parseFloat(ball.style.left);
       const startY = parseFloat(ball.style.top);
       const targetX = direction === 'left' ? startX - 100 : startX + 100;
@@ -370,7 +384,12 @@
       const duration = 1500;
       const startTime = performance.now();
 
+      const animKey = (parseInt(ball.dataset.animKey || "0", 10) || 0) + 1;
+      ball.dataset.animKey = String(animKey);
+
       function animate(currentTime) {
+        if (ball.dataset.animKey !== String(animKey)) return;
+
         const elapsed = currentTime - startTime;
         const progress = Math.min(elapsed / duration, 1);
 
@@ -391,10 +410,28 @@
       requestAnimationFrame(animate);
     }
 
+    function triggerLeakyCooldown(nowMs) {
+      const sec = Math.max(0, getFloatValue('leakyCooldownSec', 1));
+      const until = nowMs + sec * 1000;
+      if (until > leakyState.cooldownUntilMs) leakyState.cooldownUntilMs = until;
+    }
+
+    function triggerTokenCooldown(nowMs) {
+      const sec = Math.max(0, getFloatValue('tokenCooldownSec', 1));
+      const until = nowMs + sec * 1000;
+      if (until > tokenState.cooldownUntilMs) tokenState.cooldownUntilMs = until;
+    }
+
     // Leaky bucket: produce data
     function produceLeakyData() {
       const rate = parseFloat(document.getElementById('leakyDataRate').value) || 0;
       if (rate <= 0) return;
+
+      const now = Date.now();
+      if (now < leakyState.cooldownUntilMs) {
+        updateStats();
+        return;
+      }
 
       const bucketRect = getBucketRect(leakyBucket);
       const startX = bucketRect.left + bucketRect.width / 2 - BALL_SIZE / 2 + (Math.random() - 0.5) * 60;
@@ -402,40 +439,35 @@
 
       const ball = createBall('green', startX, startY, leakyViz);
 
-      const backpressureDelay = Math.max(0, getIntValue('leakyBackpressureDelay', 0));
-      const fullness = leakyState.bucketCount + leakyState.pendingAccepted;
-      const admitLimit = BUCKET_CAPACITY + backpressureDelay;
-
-      // If admit limit reached, immediately overflow (rejected arrival)
-      if (fullness >= admitLimit) {
+      // FULL -> overflow + start cooldown (actual backpressure signal)
+      if (leakyState.bucketCount >= BUCKET_CAPACITY) {
         leakyState.overflowed++;
+        triggerLeakyCooldown(now);
+
         const direction = Math.random() > 0.5 ? 'left' : 'right';
         const overflowY = bucketRect.top - 20;
         animateBall(ball, overflowY, 400, () => {
           animateOverflow(ball, direction, bucketRect.vizHeight);
         });
+
         updateStats();
         return;
       }
 
-      // ADMIT: reserve a slot immediately (models backpressure delay)
-      leakyState.pendingAccepted++;
+      // ACCEPT immediately (logical enqueue happens now, not after animation)
+      const reservedIndex = leakyState.bucketCount; // for visual stacking
+      leakyState.bucketCount++;
+      leakyState.inFlight.push(ball);
 
-      const targetY = bucketRect.top + bucketRect.height - 30 - (leakyState.bucketCount * 1.5);
+      const targetY = bucketRect.top + bucketRect.height - 30 - (reservedIndex * 1.5);
 
       animateBall(ball, targetY, 800, () => {
-        // Release reservation on arrival
-        leakyState.pendingAccepted--;
+        if (!ball.isConnected) { updateStats(); return; }
 
-        // Real bucket capacity check at landing
-        if (leakyState.bucketCount >= BUCKET_CAPACITY) {
-          leakyState.overflowed++;
-          const direction = Math.random() > 0.5 ? 'left' : 'right';
-          animateOverflow(ball, direction, bucketRect.vizHeight);
-        } else {
-          leakyState.bucketCount++;
-          leakyState.balls.push(ball);
-        }
+        const idx = leakyState.inFlight.indexOf(ball);
+        if (idx !== -1) leakyState.inFlight.splice(idx, 1);
+
+        leakyState.balls.push(ball);
         updateStats();
       });
 
@@ -450,14 +482,18 @@
       leakyState.bucketCount--;
       leakyState.consumed++;
 
-      const ball = leakyState.balls.shift();
+      // Prefer a landed ball; if none, pull the oldest in-flight ball (cancels its fall)
+      let ball = leakyState.balls.shift();
+      if (!ball) {
+        ball = leakyState.inFlight.shift();
+      }
+
       if (ball) {
         const bucketRect = getBucketRect(leakyBucket);
         const targetY = bucketRect.vizHeight + 50;
 
-        // Move ball to hole position
+        // Teleport to hole position and animate out (also cancels any in-flight fall)
         ball.style.left = `${bucketRect.left + bucketRect.width / 2 - BALL_SIZE / 2}px`;
-
         animateBall(ball, targetY, 600, () => {
           ball.remove();
         });
@@ -471,46 +507,47 @@
       const rate = parseFloat(document.getElementById('tokenAddRate').value) || 0;
       if (rate <= 0) return;
 
+      const now = Date.now();
+      if (now < tokenState.cooldownUntilMs) {
+        updateStats();
+        return;
+      }
+
       const bucketRect = getBucketRect(tokenBucket);
       const startX = bucketRect.left + bucketRect.width / 2 - BALL_SIZE / 2 + (Math.random() - 0.5) * 60;
       const startY = 50;
 
       const ball = createBall('blue', startX, startY, tokenViz);
 
-      const backpressureDelay = Math.max(0, getIntValue('tokenBackpressureDelay', 0));
-      const fullness = tokenState.bucketCount + tokenState.pendingAccepted;
-      const admitLimit = BUCKET_CAPACITY + backpressureDelay;
-
-      // If admit limit reached, immediately overflow (rejected arrival)
-      if (fullness >= admitLimit) {
+      // FULL -> overflow + start cooldown
+      if (tokenState.bucketCount >= BUCKET_CAPACITY) {
         tokenState.overflowed++;
+        triggerTokenCooldown(now);
+
         const direction = Math.random() > 0.5 ? 'left' : 'right';
         const overflowY = bucketRect.top - 20;
         animateBall(ball, overflowY, 400, () => {
           animateOverflow(ball, direction, bucketRect.vizHeight);
         });
+
         updateStats();
         return;
       }
 
-      // ADMIT: reserve a slot immediately (models backpressure delay)
-      tokenState.pendingAccepted++;
+      // ACCEPT immediately
+      const reservedIndex = tokenState.bucketCount;
+      tokenState.bucketCount++;
+      tokenState.inFlight.push(ball);
 
-      const targetY = bucketRect.top + bucketRect.height - 30 - (tokenState.bucketCount * 1.5);
+      const targetY = bucketRect.top + bucketRect.height - 30 - (reservedIndex * 1.5);
 
       animateBall(ball, targetY, 800, () => {
-        // Release reservation on arrival
-        tokenState.pendingAccepted--;
+        if (!ball.isConnected) { updateStats(); return; }
 
-        // Real bucket capacity check at landing
-        if (tokenState.bucketCount >= BUCKET_CAPACITY) {
-          tokenState.overflowed++;
-          const direction = Math.random() > 0.5 ? 'left' : 'right';
-          animateOverflow(ball, direction, bucketRect.vizHeight);
-        } else {
-          tokenState.bucketCount++;
-          tokenState.balls.push(ball);
-        }
+        const idx = tokenState.inFlight.indexOf(ball);
+        if (idx !== -1) tokenState.inFlight.splice(idx, 1);
+
+        tokenState.balls.push(ball);
         updateStats();
       });
 
@@ -525,7 +562,7 @@
       const arm = document.createElement('div');
       arm.className = `arm ${isBurst ? 'burst' : ''}`;
       arm.style.borderColor = isBurst ? '#ffc107' : '#dc3545';
-      // Offset: steady-state (red) arm is higher, burst (yellow) arm is lower
+
       const verticalOffset = isBurst ? 80 : 50;
       arm.style.top = `${bucketRect.top + verticalOffset}px`;
       arm.style.width = '0px';
@@ -577,6 +614,17 @@
       requestAnimationFrame(animateExtend);
     }
 
+    function removeTokenBallForTake() {
+      // Prefer landed (pop); if none, remove newest in-flight
+      let ball = tokenState.balls.pop();
+      if (!ball) ball = tokenState.inFlight.pop();
+
+      if (ball) {
+        bumpAnimKey(ball); // cancel any fall
+        ball.remove();
+      }
+    }
+
     // Token bucket: take token (steady state)
     function takeToken() {
       const rate = parseFloat(document.getElementById('tokenTakeRate').value) || 0;
@@ -587,11 +635,7 @@
           tokenState.bucketCount--;
           tokenState.taken++;
 
-          const ball = tokenState.balls.pop();
-          if (ball) {
-            ball.remove();
-          }
-
+          removeTokenBallForTake();
           updateStats();
         }
       });
@@ -609,14 +653,9 @@
           if (tokenState.bucketCount > 0) {
             tokenState.bucketCount--;
             tokenState.taken++;
-
-            const ball = tokenState.balls.pop();
-            if (ball) {
-              ball.remove();
-            }
+            removeTokenBallForTake();
           }
         }
-
         updateStats();
       });
     }
@@ -670,12 +709,11 @@
     document.getElementById('tokenAddRate').addEventListener('input', updateStats);
     document.getElementById('tokenTakeRate').addEventListener('change', updateTokenTakeInterval);
 
-    // Backpressure delay inputs: just update stats immediately
-    document.getElementById('leakyBackpressureDelay').addEventListener('input', updateStats);
-    document.getElementById('tokenBackpressureDelay').addEventListener('input', updateStats);
+    document.getElementById('leakyCooldownSec').addEventListener('input', updateStats);
+    document.getElementById('tokenCooldownSec').addEventListener('input', updateStats);
 
-    // Periodic update for effective rate display
-    setInterval(updateStats, 1000);
+    // Periodic update for effective rate display / cooldown badge
+    setInterval(updateStats, 200);
 
     // Initialize
     updateLeakyProduceInterval();
