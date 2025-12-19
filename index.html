@@ -1,1 +1,688 @@
-foo
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rate Limiting Visualizer v1</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      background-color: #1a1a2e;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    .half {
+      height: 100vh;
+      border-right: 1px solid #444;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .half:last-child { border-right: none; }
+
+    .controls {
+      padding: 15px;
+      background-color: #16213e;
+      border-bottom: 1px solid #444;
+      z-index: 10;
+    }
+
+    .visualization {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .bucket {
+      position: absolute;
+      bottom: 100px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 160px;
+      height: 200px;
+      border: 4px solid #888;
+      border-top: none;
+      background: linear-gradient(to bottom, rgba(50,50,80,0.3), rgba(30,30,60,0.5));
+      border-radius: 0 0 20px 20px;
+    }
+
+    .bucket-hole {
+      position: absolute;
+      bottom: -4px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 30px;
+      height: 15px;
+      background-color: #1a1a2e;
+      border-radius: 0 0 15px 15px;
+    }
+
+    .ball {
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      z-index: 3;
+    }
+
+    .ball.green {
+      background: radial-gradient(circle at 30% 30%, #90EE90, #228B22);
+      box-shadow: 0 0 8px rgba(34, 139, 34, 0.6);
+    }
+
+    .ball.blue {
+      background: radial-gradient(circle at 30% 30%, #87CEEB, #1E90FF);
+      box-shadow: 0 0 8px rgba(30, 144, 255, 0.6);
+    }
+
+    .fill-level {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: linear-gradient(to top, rgba(34, 139, 34, 0.4), rgba(144, 238, 144, 0.2));
+      border-radius: 0 0 16px 16px;
+      transition: height 0.3s ease;
+    }
+
+    .fill-level.blue {
+      background: linear-gradient(to top, rgba(30, 144, 255, 0.4), rgba(135, 206, 235, 0.2));
+    }
+
+    .stat-badge { font-size: 0.85rem; }
+
+    .arm {
+      position: absolute;
+      height: 8px;
+      background-color: #dc3545;
+      border-radius: 4px;
+      right: 0;
+      z-index: 10;
+      transform-origin: right center;
+    }
+
+    .arm.burst { background-color: #ffc107; }
+
+    .arm-claw {
+      position: absolute;
+      left: -12px;
+      top: -6px;
+      width: 20px;
+      height: 20px;
+      border: 3px solid;
+      border-color: inherit;
+      border-radius: 50%;
+      background: transparent;
+    }
+
+    .bucket-info {
+      position: absolute;
+      bottom: 305px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.75rem;
+      color: #888;
+      text-align: center;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="container-fluid h-100">
+    <div class="row h-100">
+      <!-- Left Half - Leaky Bucket -->
+      <div class="col-6 half">
+        <div class="controls">
+          <h5 class="text-center mb-3">Leaky Bucket</h5>
+          <div class="row g-2">
+            <div class="col-4">
+              <label class="form-label small">Data/sec</label>
+              <input type="number" class="form-control form-control-sm" id="leakyDataRate" value="1" min="0" max="20">
+            </div>
+            <div class="col-4">
+              <label class="form-label small">Drip Rate/sec</label>
+              <input type="number" class="form-control form-control-sm" id="leakyDripRate" value="1" min="0" max="20" step="1">
+            </div>
+            <div class="col-4">
+              <label class="form-label small">Backpressure Delay</label>
+              <input type="number" class="form-control form-control-sm" id="leakyBackpressureDelay" value="2" min="0" step="1">
+            </div>
+
+            <div class="col-3">
+              <span class="badge bg-danger stat-badge">Overflowed: <span id="leakyOverflow">0</span></span>
+            </div>
+            <div class="col-3">
+              <span class="badge bg-success stat-badge">Consumed: <span id="leakyConsumed">0</span></span>
+            </div>
+            <div class="col-3">
+              <span class="badge bg-primary stat-badge">Eff. Rate: <span id="leakyEffRate">0.00</span>/s</span>
+            </div>
+            <div class="col-3">
+              <span class="badge stat-badge" id="leakyProducingBadge">Data Producer: <span id="leakyProducing">ON</span></span>
+            </div>
+          </div>
+        </div>
+        <div class="visualization" id="leakyViz">
+          <div class="bucket-info">
+            <div>Capacity: 100</div>
+            <div>Current: <span id="leakyCurrentCount">0</span></div>
+          </div>
+          <div class="bucket" id="leakyBucket">
+            <div class="bucket-hole"></div>
+            <div class="fill-level" id="leakyFill"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Half - Token Bucket -->
+      <div class="col-6 half">
+        <div class="controls">
+          <h5 class="text-center mb-3">Token Bucket</h5>
+          <div class="row g-2">
+            <div class="col-3">
+              <label class="form-label small">Tokens/sec</label>
+              <input type="number" class="form-control form-control-sm" id="tokenAddRate" value="1" min="0" max="20">
+            </div>
+            <div class="col-3">
+              <label class="form-label small">Constant Take Rate/sec</label>
+              <input type="number" class="form-control form-control-sm" id="tokenTakeRate" value="1" min="0" max="20" step="1">
+            </div>
+            <div class="col-3">
+              <label class="form-label small">Burst Take Amount</label>
+              <input type="number" class="form-control form-control-sm" id="burstAmount" value="50" min="1" max="100">
+            </div>
+            <div class="col-3">
+              <label class="form-label small">Backpressure Delay</label>
+              <input type="number" class="form-control form-control-sm" id="tokenBackpressureDelay" value="2" min="0" step="1">
+            </div>
+
+            <div class="col-2">
+              <button class="btn btn-warning btn-sm w-100" id="burstBtn">BURST</button>
+            </div>
+            <div class="col-2">
+              <span class="badge bg-danger stat-badge">Overflowed: <span id="tokenOverflow">0</span></span>
+            </div>
+            <div class="col-2">
+              <span class="badge bg-info stat-badge">Taken: <span id="tokensTaken">0</span></span>
+            </div>
+            <div class="col-3">
+              <span class="badge bg-primary stat-badge">Eff. Rate: <span id="tokenEffRate">0.00</span>/s</span>
+            </div>
+            <div class="col-3">
+              <span class="badge stat-badge" id="tokenProducingBadge">Token Producer: <span id="tokenProducing">ON</span></span>
+            </div>
+          </div>
+        </div>
+        <div class="visualization" id="tokenViz">
+          <div class="bucket-info">
+            <div>Capacity: 100</div>
+            <div>Current: <span id="tokenCurrentCount">0</span></div>
+          </div>
+          <div class="bucket" id="tokenBucket">
+            <div class="fill-level blue" id="tokenFill"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    const BUCKET_CAPACITY = 100;
+    const BALL_SIZE = 16;
+    const simulationStartTime = Date.now();
+
+    // State
+    let leakyState = {
+      bucketCount: 0,
+      pendingAccepted: 0, // NEW
+      overflowed: 0,
+      consumed: 0,
+      balls: []
+    };
+
+    let tokenState = {
+      bucketCount: 0,
+      pendingAccepted: 0, // NEW
+      overflowed: 0,
+      taken: 0,
+      balls: []
+    };
+
+    // DOM Elements
+    const leakyViz = document.getElementById('leakyViz');
+    const tokenViz = document.getElementById('tokenViz');
+    const leakyBucket = document.getElementById('leakyBucket');
+    const tokenBucket = document.getElementById('tokenBucket');
+    const leakyFill = document.getElementById('leakyFill');
+    const tokenFill = document.getElementById('tokenFill');
+
+    // Get bucket positions
+    function getBucketRect(bucket) {
+      const vizRect = bucket.parentElement.getBoundingClientRect();
+      const bucketRect = bucket.getBoundingClientRect();
+      return {
+        left: bucketRect.left - vizRect.left,
+        top: bucketRect.top - vizRect.top,
+        width: bucketRect.width,
+        height: bucketRect.height,
+        vizHeight: vizRect.height
+      };
+    }
+
+    // Create a ball element
+    function createBall(color, x, y, container) {
+      const ball = document.createElement('div');
+      ball.className = `ball ${color}`;
+      ball.style.left = `${x}px`;
+      ball.style.top = `${y}px`;
+      container.appendChild(ball);
+      return ball;
+    }
+
+    // Update fill level display
+    function updateFillLevel(fillElement, count) {
+      const percentage = (count / BUCKET_CAPACITY) * 100;
+      fillElement.style.height = `${Math.min(percentage, 100)}%`;
+    }
+
+    // Calculate elapsed seconds since simulation started
+    function getElapsedSeconds() {
+      return Math.max(1, Math.floor((Date.now() - simulationStartTime) / 1000));
+    }
+
+    function getIntValue(id, fallback = 0) {
+      const v = parseInt(document.getElementById(id).value, 10);
+      return Number.isFinite(v) ? v : fallback;
+    }
+
+    // Update stats display
+    function updateStats() {
+      const leakyDataRate = parseFloat(document.getElementById('leakyDataRate').value) || 0;
+      const tokenAddRate = parseFloat(document.getElementById('tokenAddRate').value) || 0;
+      const elapsedSeconds = getElapsedSeconds();
+
+      const leakyBackpressureDelay = Math.max(0, getIntValue('leakyBackpressureDelay', 0));
+      const tokenBackpressureDelay = Math.max(0, getIntValue('tokenBackpressureDelay', 0));
+
+      const leakyFullness = leakyState.bucketCount + leakyState.pendingAccepted;
+      const tokenFullness = tokenState.bucketCount + tokenState.pendingAccepted;
+
+      // Producer is OFF if rate is 0 OR "admit limit" reached (capacity + backpressure delay)
+      const leakyProducerOn = leakyDataRate > 0 && leakyFullness < (BUCKET_CAPACITY + leakyBackpressureDelay);
+      const tokenProducerOn = tokenAddRate > 0 && tokenFullness < (BUCKET_CAPACITY + tokenBackpressureDelay);
+
+      // Calculate effective consumption rates
+      const leakyEffectiveRate = (leakyState.consumed / elapsedSeconds).toFixed(2);
+      const tokenEffectiveRate = (tokenState.taken / elapsedSeconds).toFixed(2);
+
+      document.getElementById('leakyOverflow').textContent = leakyState.overflowed;
+      document.getElementById('leakyConsumed').textContent = leakyState.consumed;
+      document.getElementById('leakyEffRate').textContent = leakyEffectiveRate;
+      document.getElementById('leakyProducing').textContent = leakyProducerOn ? 'ON' : 'OFF';
+      document.getElementById('leakyProducingBadge').className = `badge stat-badge ${leakyProducerOn ? 'bg-success' : 'bg-secondary'}`;
+      document.getElementById('leakyCurrentCount').textContent = leakyState.bucketCount;
+
+      document.getElementById('tokenOverflow').textContent = tokenState.overflowed;
+      document.getElementById('tokensTaken').textContent = tokenState.taken;
+      document.getElementById('tokenEffRate').textContent = tokenEffectiveRate;
+      document.getElementById('tokenProducing').textContent = tokenProducerOn ? 'ON' : 'OFF';
+      document.getElementById('tokenProducingBadge').className = `badge stat-badge ${tokenProducerOn ? 'bg-success' : 'bg-secondary'}`;
+      document.getElementById('tokenCurrentCount').textContent = tokenState.bucketCount;
+
+      updateFillLevel(leakyFill, leakyState.bucketCount);
+      updateFillLevel(tokenFill, tokenState.bucketCount);
+    }
+
+    // Animate ball falling
+    function animateBall(ball, targetY, duration, onComplete) {
+      const startY = parseFloat(ball.style.top);
+      const startTime = performance.now();
+
+      function animate(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        const easeProgress = progress * progress; // Simple ease-in
+
+        const currentY = startY + (targetY - startY) * easeProgress;
+        ball.style.top = `${currentY}px`;
+
+        if (progress < 1) {
+          requestAnimationFrame(animate);
+        } else if (onComplete) {
+          onComplete();
+        }
+      }
+
+      requestAnimationFrame(animate);
+    }
+
+    // Animate overflow (ball falls to the side)
+    function animateOverflow(ball, direction, vizHeight) {
+      const startX = parseFloat(ball.style.left);
+      const startY = parseFloat(ball.style.top);
+      const targetX = direction === 'left' ? startX - 100 : startX + 100;
+      const targetY = vizHeight + 50;
+      const duration = 1500;
+      const startTime = performance.now();
+
+      function animate(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+
+        const currentX = startX + (targetX - startX) * progress;
+        const currentY = startY + (targetY - startY) * progress * progress;
+
+        ball.style.left = `${currentX}px`;
+        ball.style.top = `${currentY}px`;
+        ball.style.opacity = 1 - progress;
+
+        if (progress < 1) {
+          requestAnimationFrame(animate);
+        } else {
+          ball.remove();
+        }
+      }
+
+      requestAnimationFrame(animate);
+    }
+
+    // Leaky bucket: produce data
+    function produceLeakyData() {
+      const rate = parseFloat(document.getElementById('leakyDataRate').value) || 0;
+      if (rate <= 0) return;
+
+      const bucketRect = getBucketRect(leakyBucket);
+      const startX = bucketRect.left + bucketRect.width / 2 - BALL_SIZE / 2 + (Math.random() - 0.5) * 60;
+      const startY = 50;
+
+      const ball = createBall('green', startX, startY, leakyViz);
+
+      const backpressureDelay = Math.max(0, getIntValue('leakyBackpressureDelay', 0));
+      const fullness = leakyState.bucketCount + leakyState.pendingAccepted;
+      const admitLimit = BUCKET_CAPACITY + backpressureDelay;
+
+      // If admit limit reached, immediately overflow (rejected arrival)
+      if (fullness >= admitLimit) {
+        leakyState.overflowed++;
+        const direction = Math.random() > 0.5 ? 'left' : 'right';
+        const overflowY = bucketRect.top - 20;
+        animateBall(ball, overflowY, 400, () => {
+          animateOverflow(ball, direction, bucketRect.vizHeight);
+        });
+        updateStats();
+        return;
+      }
+
+      // ADMIT: reserve a slot immediately (models backpressure delay)
+      leakyState.pendingAccepted++;
+
+      const targetY = bucketRect.top + bucketRect.height - 30 - (leakyState.bucketCount * 1.5);
+
+      animateBall(ball, targetY, 800, () => {
+        // Release reservation on arrival
+        leakyState.pendingAccepted--;
+
+        // Real bucket capacity check at landing
+        if (leakyState.bucketCount >= BUCKET_CAPACITY) {
+          leakyState.overflowed++;
+          const direction = Math.random() > 0.5 ? 'left' : 'right';
+          animateOverflow(ball, direction, bucketRect.vizHeight);
+        } else {
+          leakyState.bucketCount++;
+          leakyState.balls.push(ball);
+        }
+        updateStats();
+      });
+
+      updateStats();
+    }
+
+    // Leaky bucket: drip data
+    function dripLeakyData() {
+      const rate = parseFloat(document.getElementById('leakyDripRate').value) || 0;
+      if (rate <= 0 || leakyState.bucketCount <= 0) return;
+
+      leakyState.bucketCount--;
+      leakyState.consumed++;
+
+      const ball = leakyState.balls.shift();
+      if (ball) {
+        const bucketRect = getBucketRect(leakyBucket);
+        const targetY = bucketRect.vizHeight + 50;
+
+        // Move ball to hole position
+        ball.style.left = `${bucketRect.left + bucketRect.width / 2 - BALL_SIZE / 2}px`;
+
+        animateBall(ball, targetY, 600, () => {
+          ball.remove();
+        });
+      }
+
+      updateStats();
+    }
+
+    // Token bucket: add token
+    function addToken() {
+      const rate = parseFloat(document.getElementById('tokenAddRate').value) || 0;
+      if (rate <= 0) return;
+
+      const bucketRect = getBucketRect(tokenBucket);
+      const startX = bucketRect.left + bucketRect.width / 2 - BALL_SIZE / 2 + (Math.random() - 0.5) * 60;
+      const startY = 50;
+
+      const ball = createBall('blue', startX, startY, tokenViz);
+
+      const backpressureDelay = Math.max(0, getIntValue('tokenBackpressureDelay', 0));
+      const fullness = tokenState.bucketCount + tokenState.pendingAccepted;
+      const admitLimit = BUCKET_CAPACITY + backpressureDelay;
+
+      // If admit limit reached, immediately overflow (rejected arrival)
+      if (fullness >= admitLimit) {
+        tokenState.overflowed++;
+        const direction = Math.random() > 0.5 ? 'left' : 'right';
+        const overflowY = bucketRect.top - 20;
+        animateBall(ball, overflowY, 400, () => {
+          animateOverflow(ball, direction, bucketRect.vizHeight);
+        });
+        updateStats();
+        return;
+      }
+
+      // ADMIT: reserve a slot immediately (models backpressure delay)
+      tokenState.pendingAccepted++;
+
+      const targetY = bucketRect.top + bucketRect.height - 30 - (tokenState.bucketCount * 1.5);
+
+      animateBall(ball, targetY, 800, () => {
+        // Release reservation on arrival
+        tokenState.pendingAccepted--;
+
+        // Real bucket capacity check at landing
+        if (tokenState.bucketCount >= BUCKET_CAPACITY) {
+          tokenState.overflowed++;
+          const direction = Math.random() > 0.5 ? 'left' : 'right';
+          animateOverflow(ball, direction, bucketRect.vizHeight);
+        } else {
+          tokenState.bucketCount++;
+          tokenState.balls.push(ball);
+        }
+        updateStats();
+      });
+
+      updateStats();
+    }
+
+    // Create grabber arm animation
+    function createGrabberArm(isBurst, onGrab) {
+      const bucketRect = getBucketRect(tokenBucket);
+      const vizRect = tokenViz.getBoundingClientRect();
+
+      const arm = document.createElement('div');
+      arm.className = `arm ${isBurst ? 'burst' : ''}`;
+      arm.style.borderColor = isBurst ? '#ffc107' : '#dc3545';
+      // Offset: steady-state (red) arm is higher, burst (yellow) arm is lower
+      const verticalOffset = isBurst ? 80 : 50;
+      arm.style.top = `${bucketRect.top + verticalOffset}px`;
+      arm.style.width = '0px';
+
+      const claw = document.createElement('div');
+      claw.className = 'arm-claw';
+      claw.style.borderColor = isBurst ? '#ffc107' : '#dc3545';
+      arm.appendChild(claw);
+
+      tokenViz.appendChild(arm);
+
+      const targetWidth = vizRect.width / 2 + 20;
+      const duration = isBurst ? 200 : 400;
+      const startTime = performance.now();
+
+      function animateExtend(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+
+        arm.style.width = `${targetWidth * progress}px`;
+
+        if (progress < 1) {
+          requestAnimationFrame(animateExtend);
+        } else {
+          onGrab();
+          animateRetract();
+        }
+      }
+
+      function animateRetract() {
+        const retractStart = performance.now();
+
+        function retract(currentTime) {
+          const elapsed = currentTime - retractStart;
+          const progress = Math.min(elapsed / duration, 1);
+
+          arm.style.width = `${targetWidth * (1 - progress)}px`;
+
+          if (progress < 1) {
+            requestAnimationFrame(retract);
+          } else {
+            arm.remove();
+          }
+        }
+
+        requestAnimationFrame(retract);
+      }
+
+      requestAnimationFrame(animateExtend);
+    }
+
+    // Token bucket: take token (steady state)
+    function takeToken() {
+      const rate = parseFloat(document.getElementById('tokenTakeRate').value) || 0;
+      if (rate <= 0 || tokenState.bucketCount <= 0) return;
+
+      createGrabberArm(false, () => {
+        if (tokenState.bucketCount > 0) {
+          tokenState.bucketCount--;
+          tokenState.taken++;
+
+          const ball = tokenState.balls.pop();
+          if (ball) {
+            ball.remove();
+          }
+
+          updateStats();
+        }
+      });
+    }
+
+    // Token bucket: burst take
+    function burstTake() {
+      const amount = parseInt(document.getElementById('burstAmount').value, 10) || 50;
+      const toTake = Math.min(amount, tokenState.bucketCount);
+
+      if (toTake <= 0) return;
+
+      createGrabberArm(true, () => {
+        for (let i = 0; i < toTake; i++) {
+          if (tokenState.bucketCount > 0) {
+            tokenState.bucketCount--;
+            tokenState.taken++;
+
+            const ball = tokenState.balls.pop();
+            if (ball) {
+              ball.remove();
+            }
+          }
+        }
+
+        updateStats();
+      });
+    }
+
+    // Event listeners
+    document.getElementById('burstBtn').addEventListener('click', burstTake);
+
+    // Interval managers
+    let leakyProduceInterval, leakyDripInterval, tokenAddInterval, tokenTakeInterval;
+
+    function updateLeakyProduceInterval() {
+      clearInterval(leakyProduceInterval);
+      const rate = parseFloat(document.getElementById('leakyDataRate').value) || 0;
+      if (rate > 0) {
+        leakyProduceInterval = setInterval(produceLeakyData, 1000 / rate);
+      }
+      updateStats();
+    }
+
+    function updateLeakyDripInterval() {
+      clearInterval(leakyDripInterval);
+      const rate = parseFloat(document.getElementById('leakyDripRate').value) || 0;
+      if (rate > 0) {
+        leakyDripInterval = setInterval(dripLeakyData, 1000 / rate);
+      }
+    }
+
+    function updateTokenAddInterval() {
+      clearInterval(tokenAddInterval);
+      const rate = parseFloat(document.getElementById('tokenAddRate').value) || 0;
+      if (rate > 0) {
+        tokenAddInterval = setInterval(addToken, 1000 / rate);
+      }
+      updateStats();
+    }
+
+    function updateTokenTakeInterval() {
+      clearInterval(tokenTakeInterval);
+      const rate = parseFloat(document.getElementById('tokenTakeRate').value) || 0;
+      if (rate > 0) {
+        tokenTakeInterval = setInterval(takeToken, 1000 / rate);
+      }
+    }
+
+    // Input change listeners
+    document.getElementById('leakyDataRate').addEventListener('change', updateLeakyProduceInterval);
+    document.getElementById('leakyDataRate').addEventListener('input', updateStats);
+    document.getElementById('leakyDripRate').addEventListener('change', updateLeakyDripInterval);
+
+    document.getElementById('tokenAddRate').addEventListener('change', updateTokenAddInterval);
+    document.getElementById('tokenAddRate').addEventListener('input', updateStats);
+    document.getElementById('tokenTakeRate').addEventListener('change', updateTokenTakeInterval);
+
+    // Backpressure delay inputs: just update stats immediately
+    document.getElementById('leakyBackpressureDelay').addEventListener('input', updateStats);
+    document.getElementById('tokenBackpressureDelay').addEventListener('input', updateStats);
+
+    // Periodic update for effective rate display
+    setInterval(updateStats, 1000);
+
+    // Initialize
+    updateLeakyProduceInterval();
+    updateLeakyDripInterval();
+    updateTokenAddInterval();
+    updateTokenTakeInterval();
+    updateStats();
+  </script>
+</body>
+</html>
