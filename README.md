@@ -1,6 +1,10 @@
 # leaky-vs-token-bucket
 
-## Notes
+## Where to play with the simulation?
+
+https://aaronshaver.github.io/leaky-vs-token-bucket/
+
+## Notes?
 
 * Full credit goes to Michael Drogalis (of https://shadowtraffic.io/) for sparking the idea in me to try creating this app
 * Click the BURST button to do a one-time burst of taking tokens
